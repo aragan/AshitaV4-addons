@@ -1,19 +1,19 @@
 
 addon.name     = 'singer'
 addon.author   = 'Aragan'
-addon.version  = '1.0 , transformers coming'
-addon.desc     = 'Singer (No HUD) for Ashita v4'
+addon.version  = '1.2.1 - version gate of transformers coming'
+addon.desc     = 'Singer with FontManager HUD for Ashita v4'
 addon.link     = 'https://github.com/aragan/Ashita-addons/tree/main/singer'
 
 require('common')
 
 --[[
-    Singer (Ashita v4) - No HUD (SAFE)
+    Singer (Ashita v4) - FontManager HUD (SAFE)
     Author: Aragan
 
     Goal:
       - Rotate BRD songs on Ashita v4.
-      - No HUD, no ImGui, and no Windower libraries.
+      - Native Ashita FontManager HUD; no ImGui or Windower libraries.
 
     Safety:
       - Use the correct QueueCommand signature in Ashita v4: (command, delay)
@@ -66,13 +66,37 @@ local state = {
     -- Song playlists from settings.lua (optional)
     settings    = nil,
     playlist    = nil,
+
+    -- pbar-style HUD state, ported from the Ashita v3 Singer HUD.
+    hud_enabled       = true,
+    hud_collapsed     = false,
+    hud_x             = 20,
+    hud_y             = 120,
+    hud_font_name     = 'Arial',
+    hud_font_size     = 11,
+    hud_font_color    = 0xFFFFFFFF,
+    hud_font_bold     = true,
+    hud_bg_color      = 0xC0101512,
+    hud_bg_visible    = true,
+    hud_border_color  = 0xFF4E9B62,
+    hud_lines         = {},
+    hud_actions       = {},
+    hud_box           = { x = 20, y = 120, w = 220, h = 40 },
+    hud_drag_pending  = false,
+    hud_dragging      = false,
+    hud_drag_start_x  = 0,
+    hud_drag_start_y  = 0,
+    hud_drag_dx       = 0,
+    hud_drag_dy       = 0,
+    hud_next_update   = 0.0,
+    hud_error_reported = false,
 }
 
 
 local echo
 
 ------------------------------------------------------------
--- settings.lua support (song playlists) - no HUD
+-- settings.lua support (song playlists)
 ------------------------------------------------------------
 -- The legacy settings.lua style uses L{} and T{}.
 -- Here we define them as simple functions so the file works without Windower libraries.
@@ -277,8 +301,8 @@ local function build_steps_for_song_list(list)
     end
 
     if state.ccsv then
-        steps[#steps+1] = { cmd = '/ja "Clarion Call"', wait = 1.0 }
-        steps[#steps+1] = { cmd = '/ja "Soul Voice"',   wait = 1.0 }
+        steps[#steps+1] = { cmd = '/ja "Clarion Call" <me>', wait = 1.6 }
+        steps[#steps+1] = { cmd = '/ja "Soul Voice" <me>',   wait = 2.0 }
         actions = actions + 2
     end
 
@@ -332,7 +356,7 @@ end
 -- Status and help
 ------------------------------------------------------------
 local function show_status()
-    echo(('Status: %s | Delay: %.1fs (+%.1f) | Interval: %.0fs | Target: %s | Nitro: %s | CCSV: %s | Playlist: %s'):format(
+    echo(('Status: %s | Delay: %.1fs (+%.1f) | Interval: %.0fs | Target: %s | Nitro: %s | CCSV: %s | Playlist: %s | HUD: %s'):format(
         state.enabled and 'ON' or 'OFF',
         state.song_delay,
         (state.pad or 0),
@@ -340,7 +364,8 @@ local function show_status()
         state.target,
         state.nitro and 'ON' or 'OFF',
         state.ccsv and 'ON' or 'OFF',
-        state.playlist or 'custom'
+        state.playlist or 'custom',
+        state.hud_enabled and 'ON' or 'OFF'
     ))
     echo(('Songs: %s'):format(table.concat(state.songs, ' | ')))
 end
@@ -358,6 +383,309 @@ local function show_help()
     echo('/singer target <tgt>  (ex: <me> or <t>)')
     echo('/singer nitro on|off|toggle')
     echo('/singer ccsv  on|off|toggle')
+    echo('/singer hud on|off|toggle|collapse|reset|pos <x> <y>')
+end
+
+------------------------------------------------------------
+-- FontManager HUD (pbar-style, ported from Ashita v3)
+------------------------------------------------------------
+local HUD_ALIAS = '__singer_addon_hud_v4'
+local WM_MOUSEMOVE = 0x0200
+local WM_LBUTTONDOWN = 0x0201
+local WM_LBUTTONUP = 0x0202
+local script_source = debug.getinfo(1, 'S').source:gsub('^@', '')
+local script_dir = script_source:match('^(.*[\\/])') or './'
+local HUD_CONFIG_PATH = script_dir .. 'settings/hud.lua'
+local HUD_ROW_HEIGHT = 18
+local hud_row_fonts = {}
+
+local function load_hud_settings()
+    local loader = loadfile(HUD_CONFIG_PATH)
+    if not loader then return false end
+
+    local ok, cfg = pcall(loader)
+    if not ok or type(cfg) ~= 'table' then return false end
+
+    if type(cfg.enabled) == 'boolean' then state.hud_enabled = cfg.enabled end
+    if type(cfg.collapsed) == 'boolean' then state.hud_collapsed = cfg.collapsed end
+    if tonumber(cfg.x) then state.hud_x = math.floor(tonumber(cfg.x)) end
+    if tonumber(cfg.y) then state.hud_y = math.floor(tonumber(cfg.y)) end
+    return true
+end
+
+local function save_hud_settings()
+    local file = io.open(HUD_CONFIG_PATH, 'w')
+    if not file then return false end
+
+    file:write('return {\n')
+    file:write(('    enabled = %s,\n'):format(state.hud_enabled and 'true' or 'false'))
+    file:write(('    collapsed = %s,\n'):format(state.hud_collapsed and 'true' or 'false'))
+    file:write(('    x = %d,\n'):format(math.floor(tonumber(state.hud_x) or 20)))
+    file:write(('    y = %d,\n'):format(math.floor(tonumber(state.hud_y) or 120)))
+    file:write('}\n')
+    file:close()
+    return true
+end
+
+local function hud_init()
+    local fm = AshitaCore and AshitaCore:GetFontManager() or nil
+    return fm ~= nil
+end
+
+local function hud_get_row(index)
+    if hud_row_fonts[index] then return hud_row_fonts[index] end
+
+    local fm = AshitaCore and AshitaCore:GetFontManager() or nil
+    if not fm then return nil end
+
+    local alias = ('%s_%02d'):format(HUD_ALIAS, index)
+    pcall(function() fm:Delete(alias) end)
+    local ok, font = pcall(function() return fm:Create(alias) end)
+    if not ok or not font then return nil end
+
+    local setup_ok, setup_error = pcall(function()
+        font:SetBold(state.hud_font_bold and true or false)
+        font:SetColor(state.hud_font_color)
+        font:SetFontFamily(state.hud_font_name)
+        font:SetFontHeight(state.hud_font_size)
+        font:SetAutoResize(false)
+        font:SetPadding(0.1)
+        font:SetCanFocus(true)
+        font:SetVisible(false)
+
+        local bg = font:GetBackground()
+        if bg then
+            bg:SetColor(state.hud_bg_color)
+            bg:SetVisible(state.hud_bg_visible and true or false)
+            bg:SetCanFocus(true)
+            bg:SetLocked(true)
+            bg:SetBorderVisible(false)
+        end
+    end)
+    if not setup_ok then
+        pcall(function() fm:Delete(alias) end)
+        if not state.hud_error_reported then
+            state.hud_error_reported = true
+            echo('HUD row initialization failed: ' .. tostring(setup_error))
+        end
+        return nil
+    end
+
+    hud_row_fonts[index] = font
+    return font
+end
+
+local function hud_destroy()
+    local fm = AshitaCore and AshitaCore:GetFontManager() or nil
+    if fm then
+        for index = 1, #hud_row_fonts do
+            local alias = ('%s_%02d'):format(HUD_ALIAS, index)
+            pcall(function() fm:Delete(alias) end)
+        end
+    end
+    hud_row_fonts = {}
+end
+
+local function hud_set_visible(visible)
+    for _, font in ipairs(hud_row_fonts) do
+        pcall(function() font:SetVisible(visible and true or false) end)
+    end
+end
+
+local function hud_col(enabled)
+    return enabled and '|cFF38D46A|ON|r' or '|cFFFF6565|OFF|r'
+end
+
+local function hud_build_lines()
+    state.hud_lines = {}
+    state.hud_actions = {}
+
+    local function add(line, action)
+        state.hud_lines[#state.hud_lines + 1] = line
+        state.hud_actions[#state.hud_lines] = action or false
+    end
+
+    add(('|cFF8FD6A3|Singer|r %s'):format(state.hud_collapsed and '[+]' or '[-]'), function()
+        state.hud_collapsed = not state.hud_collapsed
+        save_hud_settings()
+    end)
+
+    if state.hud_collapsed then return end
+
+    add(('Enabled: [%s]'):format(hud_col(state.enabled)), function()
+        state.enabled = not state.enabled
+        state.busy = false
+        if state.enabled then state.next_cycle = now_clock() + 0.5 end
+    end)
+    add(('Busy:    [%s]'):format(hud_col(state.busy)), nil)
+    add(('Nitro:   [%s]'):format(hud_col(state.nitro)), function()
+        state.nitro = not state.nitro
+    end)
+    add(('CCSV:    [%s]'):format(hud_col(state.ccsv)), function()
+        state.ccsv = not state.ccsv
+    end)
+    add(('Playlist: |cFFFFFFFF|%s|r'):format(state.playlist or 'custom'), nil)
+    add(('Target:   |cFFFFFFFF|%s|r'):format(state.target), nil)
+    add('|cFFFFFF70|[ Cast Now ]|r', function()
+        cast_cycle()
+    end)
+
+    for i = 1, #state.songs do
+        add(('  %d) %s'):format(i, tostring(state.songs[i] or '')), nil)
+        if #state.hud_lines >= 14 then break end
+    end
+end
+
+local function hud_recalc_box()
+    local char_w = math.max(6, math.floor((tonumber(state.hud_font_size) or 11) * 0.64))
+    local max_len = 0
+
+    for _, line in ipairs(state.hud_lines) do
+        local plain = tostring(line):gsub('|c%x%x%x%x%x%x%x%x|', ''):gsub('|r', '')
+        if #plain > max_len then max_len = #plain end
+    end
+
+    state.hud_box.x = math.floor(tonumber(state.hud_x) or 20)
+    state.hud_box.y = math.floor(tonumber(state.hud_y) or 120)
+    state.hud_box.w = math.max(180, (max_len * char_w) + 14)
+    state.hud_box.h = #state.hud_lines * HUD_ROW_HEIGHT
+    state.hud_box.line_h = HUD_ROW_HEIGHT
+    state.hud_box.pad = 0
+end
+
+local function hud_update(force)
+    if not state.hud_enabled then
+        hud_set_visible(false)
+        return
+    end
+    if not hud_init() then return end
+
+    local t = now_clock()
+    if not force and t < (state.hud_next_update or 0.0) then return end
+
+    hud_build_lines()
+    hud_recalc_box()
+    local render_ok = true
+    local render_error = nil
+    for index, line in ipairs(state.hud_lines) do
+        local font = hud_get_row(index)
+        if not font then
+            render_ok = false
+            render_error = 'could not create row ' .. tostring(index)
+            break
+        end
+
+        local ok, err = pcall(function()
+            font:SetPositionX(state.hud_box.x)
+            font:SetPositionY(state.hud_box.y + ((index - 1) * HUD_ROW_HEIGHT))
+            font:SetWindowWidth(state.hud_box.w)
+            font:SetWindowHeight(HUD_ROW_HEIGHT)
+            font:SetText(line)
+            font:SetVisible(true)
+        end)
+        if not ok then
+            render_ok = false
+            render_error = err
+            break
+        end
+    end
+    for index = #state.hud_lines + 1, #hud_row_fonts do
+        pcall(function() hud_row_fonts[index]:SetVisible(false) end)
+    end
+    if not render_ok and not state.hud_error_reported then
+        state.hud_error_reported = true
+        echo('HUD render failed: ' .. tostring(render_error))
+    end
+    state.hud_next_update = t + 0.20
+end
+
+local function hud_point_inside(x, y)
+    local box = state.hud_box
+    return x >= box.x and x <= (box.x + box.w) and y >= box.y and y <= (box.y + box.h)
+end
+
+local function hud_line_at(x, y)
+    for index = 1, #state.hud_lines do
+        local font = hud_row_fonts[index]
+        if font then
+            local ok, hit = pcall(function() return font:HitTest(x, y) end)
+            if ok and hit then return index end
+        end
+    end
+
+    local box = state.hud_box
+    local relative_y = y - box.y
+    if relative_y < 0 then return 0 end
+    local line = math.floor(relative_y / HUD_ROW_HEIGHT) + 1
+    return math.max(1, math.min(line, #state.hud_lines))
+end
+
+local function hud_handle_mouse(e)
+    local message = tonumber(e.message)
+    local x = tonumber(e.x)
+    local y = tonumber(e.y)
+
+    if message == WM_LBUTTONUP and (state.hud_dragging or state.hud_drag_pending) then
+        if state.hud_drag_pending then
+            state.hud_drag_pending = false
+            local action = state.hud_actions[1]
+            if type(action) == 'function' then pcall(action) end
+        else
+            state.hud_dragging = false
+            save_hud_settings()
+        end
+        hud_update(true)
+        return true
+    end
+
+    if not state.hud_enabled or not x or not y then return false end
+
+    if state.hud_dragging then
+        if message == WM_MOUSEMOVE then
+            state.hud_x = math.floor(x - state.hud_drag_dx)
+            state.hud_y = math.floor(y - state.hud_drag_dy)
+            hud_update(true)
+        end
+        return true
+    end
+
+    if state.hud_drag_pending then
+        if message == WM_MOUSEMOVE then
+            local dx = math.abs(x - state.hud_drag_start_x)
+            local dy = math.abs(y - state.hud_drag_start_y)
+            if dx > 3 or dy > 3 then
+                state.hud_drag_pending = false
+                state.hud_dragging = true
+                state.hud_x = math.floor(x - state.hud_drag_dx)
+                state.hud_y = math.floor(y - state.hud_drag_dy)
+                hud_update(true)
+            end
+        end
+        return true
+    end
+
+    if message == WM_LBUTTONDOWN then
+        hud_update(true)
+        if not hud_point_inside(x, y) then return false end
+
+        local line = hud_line_at(x, y)
+        if line == 1 then
+            state.hud_drag_pending = true
+            state.hud_drag_start_x = x
+            state.hud_drag_start_y = y
+            state.hud_drag_dx = x - state.hud_box.x
+            state.hud_drag_dy = y - state.hud_box.y
+        end
+        return true
+    end
+
+    if message == WM_LBUTTONUP and hud_point_inside(x, y) then
+        local action = state.hud_actions[hud_line_at(x, y)]
+        if type(action) == 'function' then pcall(action) end
+        hud_update(true)
+        return true
+    end
+    return false
 end
 
 ------------------------------------------------------------
@@ -365,7 +693,9 @@ end
 ------------------------------------------------------------
 ashita.events.register('load', 'singer_load_cb', function()
     state.next_cycle = now_clock() + 2.0
-    echo('Loaded (Ashita v4, NO HUD). Use /singer help')
+    load_hud_settings()
+    hud_update(true)
+    echo('Loaded (Ashita v4, FontManager HUD). Use /singer help')
 
     if load_settings() then
         echo('settings.lua loaded. Use /singer playlists and /singer playlist <name>.')
@@ -373,11 +703,41 @@ ashita.events.register('load', 'singer_load_cb', function()
 end)
 
 ashita.events.register('unload', 'singer_unload_cb', function()
+    save_hud_settings()
+    hud_destroy()
     echo('Unloaded.')
+end)
+
+-- BRD only (owner request 2026-08-30): like the Windower Singer's job gate, plus the HUD - on any other
+-- main job the HUD is hidden and nothing is cast. Event-driven like Windower's 'job change': the job is
+-- read from memory once at load and again only after a job-info packet (0x01B) or a zone-in (0x00A).
+local job_is_brd, job_recheck = false, true
+local function is_bard()
+    if job_recheck then
+        job_recheck = false
+        local ok, job = pcall(function() return AshitaCore:GetMemoryManager():GetPlayer():GetMainJob() end)
+        job_is_brd = (ok and tonumber(job) == 10) and true or false
+    end
+    return job_is_brd
+end
+
+ashita.events.register('packet_in', 'singer_job_cb', function(e)
+    -- the packet arrives before the client applies it: defer the read to the next frame
+    if e.id == 0x01B or e.id == 0x00A then job_recheck = true end
 end)
 
 ashita.events.register('d3d_present', 'singer_present_cb', function()
     local t = now_clock()
+    if not is_bard() then
+        if not state.hud_hidden_by_job then
+            state.hud_hidden_by_job = true
+            hud_set_visible(false)
+        end
+        return
+    elseif state.hud_hidden_by_job then
+        state.hud_hidden_by_job = false
+    end
+    hud_update(false)
 
     -- Execute one step at a time (without relying on QueueCommand to batch multiple commands)
     if state.pending ~= nil then
@@ -416,6 +776,11 @@ ashita.events.register('d3d_present', 'singer_present_cb', function()
     end
 end)
 
+ashita.events.register('mouse', 'singer_mouse_cb', function(e)
+    if state.hud_hidden_by_job then return end   -- hidden on non-BRD jobs: no clicks land on it
+    if hud_handle_mouse(e) then e.blocked = true end
+end)
+
 
 ashita.events.register('command', 'singer_command_cb', function(e)
     local cmd = e.command or ''
@@ -443,7 +808,58 @@ ashita.events.register('command', 'singer_command_cb', function(e)
         return
     end
 
-    if sub == 'on' then
+    if sub == 'hud' then
+        local action = (parts[3] or ''):lower()
+        if action == '' or action == 'status' then
+            echo(('HUD: %s | Collapsed: %s | Position: %d,%d'):format(
+                state.hud_enabled and 'ON' or 'OFF',
+                state.hud_collapsed and 'YES' or 'NO',
+                state.hud_x,
+                state.hud_y
+            ))
+        elseif action == 'on' then
+            state.hud_enabled = true
+            hud_update(true)
+            save_hud_settings()
+            echo('HUD: ON')
+        elseif action == 'off' then
+            state.hud_enabled = false
+            hud_set_visible(false)
+            save_hud_settings()
+            echo('HUD: OFF')
+        elseif action == 'toggle' then
+            state.hud_enabled = not state.hud_enabled
+            hud_update(true)
+            save_hud_settings()
+            echo(('HUD: %s'):format(state.hud_enabled and 'ON' or 'OFF'))
+        elseif action == 'collapse' then
+            state.hud_collapsed = not state.hud_collapsed
+            hud_update(true)
+            save_hud_settings()
+        elseif action == 'reset' then
+            state.hud_enabled = true
+            state.hud_collapsed = false
+            state.hud_x = 20
+            state.hud_y = 120
+            hud_update(true)
+            save_hud_settings()
+            echo('HUD reset.')
+        elseif action == 'pos' or action == 'position' then
+            local x = tonumber(parts[4])
+            local y = tonumber(parts[5])
+            if not x or not y then
+                echo('Usage: /singer hud pos <x> <y>')
+                return
+            end
+            state.hud_x = math.floor(x)
+            state.hud_y = math.floor(y)
+            hud_update(true)
+            save_hud_settings()
+        else
+            echo('Usage: /singer hud on|off|toggle|collapse|reset|pos <x> <y>')
+        end
+        return
+    elseif sub == 'on' then
         state.enabled = true
         state.busy = false
         state.next_cycle = now_clock() + 0.5

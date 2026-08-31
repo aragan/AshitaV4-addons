@@ -17,7 +17,7 @@ return {
         ["ambuscade4"] = {'Blade Madrigal', 'Honor March',  "Victory March", "Valor Minuet V",},
         ["shinryu"] = {'Blade Madrigal', 'Honor March',  'Valor Minuet V', 'Dark Carol', 'Herculean Etude',},
         ["shinryu4"] = {'Blade Madrigal', 'Honor March',  'Valor Minuet V', 'Dark Carol',},
-        -- ody ADD BY Author: Aragan 
+        -- ody ADD BY Author: Flipper 
         --T1
         ["Dealan-dhe"] = {"Sentinel's Scherzo", 'Honor March',"Valor Minuet IV",  'Valor Minuet V', "Victory March",},
         --Gogmagog BRD: SV March, Honor March, Scherzo, Minuet, Dirge (on DD), Sirvente (on RUN)
@@ -32,7 +32,7 @@ return {
         --Gigelorum BRD: SV Minuet x2, March, Honor March, Dirge (on DD), Sirvente (on Tank)
         ["Gigelorum"] = {"Adventurer's Dirge",'Honor March',"Valor Minuet IV", 'Valor Minuet V', "Victory March",},
 
-        --Odyssey V25 ADD BY Author: Aragan 
+        --Odyssey V25 ADD BY Author: Flipper 
         ["mboze"] = {'Valor Minuet IV',"Sentinel's Scherzo", 'Honor March', 'Earth Carol II',  'Valor Minuet V'},
         ["mboze2"] = {'Valor Minuet IV',"Sentinel's Scherzo", 'Honor March', 'Blade Madrigal', 'Valor Minuet V',},
         

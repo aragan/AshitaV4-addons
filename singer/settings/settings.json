@@ -1,0 +1,25 @@
+{
+  "enabled": false,
+  "delay": 6.0,
+  "cycle": 180.0,
+  "set": "default",
+  "use_nitro": false,
+  "use_marcato": false,
+  "use_pianissimo": false,
+  "debug": false,
+  "sets": {
+    "default": {
+      "party_target": "<me>",
+      "party_songs": [
+        "Honor March",
+        "Mage's Ballad III",
+        "Mage's Ballad II",
+        "Army's Paeon VI"
+      ],
+      "debuff_target": "<t>",
+      "debuff_songs": [
+        "Carnage Elegy"
+      ]
+    }
+  }
+}
